@@ -1,0 +1,1 @@
+const db = require('./config/db'); async function run() { const [users] = await db.execute('SELECT company_id FROM users WHERE email=''admin@gmail.com'''); const [comp] = await db.execute('SELECT * FROM companies WHERE id=?', [users[0].company_id]); console.log(comp); process.exit(0); } run();
