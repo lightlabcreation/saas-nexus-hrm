@@ -1,23 +1,56 @@
 const db = require('../config/db');
 const { generatePayslipPDF } = require('../utils/pdfGenerator');
 
-// --- CPF Rate Helper ---
-// Ordinary Wage Ceiling: S$8,000/month
-const CPF_OW_CEILING = 8000;
+/**
+ * Flexible & Country-Independent Contribution Calculation Helper
+ * Logic Priority:
+ * 1. Employee custom percentage override (if provided and valid)
+ * 2. Company default percentage (if company contribution enabled)
+ * 3. 0% (if contribution not applicable or disabled)
+ */
+function calculateContributions(baseSalary, emp, settings) {
+    const isCompanyEnabled = settings && (settings.contribution_enabled === 1 || settings.contribution_enabled === true || settings.contribution_enabled === '1');
+    const hasEmpSetting = emp && emp.contribution_applicable !== undefined && emp.contribution_applicable !== null;
+    const isEmpApplicable = hasEmpSetting && (emp.contribution_applicable === 1 || emp.contribution_applicable === true || emp.contribution_applicable === '1');
 
-function getCpfRates(dateOfBirth) {
-    if (!dateOfBirth) return null; // DOB missing — cannot compute CPF
-    const today = new Date();
-    const dob = new Date(dateOfBirth);
-    let age = today.getFullYear() - dob.getFullYear();
-    const m = today.getMonth() - dob.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+    // If employee explicitly disabled/opted-out, or (company disabled AND employee not explicitly enabled)
+    if ((hasEmpSetting && !isEmpApplicable) || (!isCompanyEnabled && !isEmpApplicable)) {
+        return {
+            employeeContribution: 0,
+            employerContribution: 0,
+            totalContribution: 0,
+            employeeRate: 0,
+            employerRate: 0
+        };
+    }
 
-    if (age <= 55) return { employee: 0.20, employer: 0.17, total: 0.37, age };
-    if (age <= 60) return { employee: 0.18, employer: 0.16, total: 0.34, age };
-    if (age <= 65) return { employee: 0.125, employer: 0.125, total: 0.25, age };
-    if (age <= 70) return { employee: 0.075, employer: 0.09, total: 0.165, age };
-    return { employee: 0.05, employer: 0.075, total: 0.125, age };
+    // Determine Employee Contribution Percentage
+    let employeeRate = 0;
+    if (emp && emp.employee_contribution_percentage !== null && emp.employee_contribution_percentage !== undefined && emp.employee_contribution_percentage !== '') {
+        employeeRate = parseFloat(emp.employee_contribution_percentage) || 0;
+    } else if (isCompanyEnabled) {
+        employeeRate = parseFloat(settings?.default_employee_contribution_percentage || 0);
+    }
+
+    // Determine Employer Contribution Percentage
+    let employerRate = 0;
+    if (emp && emp.employer_contribution_percentage !== null && emp.employer_contribution_percentage !== undefined && emp.employer_contribution_percentage !== '') {
+        employerRate = parseFloat(emp.employer_contribution_percentage) || 0;
+    } else if (isCompanyEnabled) {
+        employerRate = parseFloat(settings?.default_employer_contribution_percentage || 0);
+    }
+
+    const employeeContribution = Math.round(baseSalary * (employeeRate / 100) * 100) / 100;
+    const employerContribution = Math.round(baseSalary * (employerRate / 100) * 100) / 100;
+    const totalContribution = Math.round((employeeContribution + employerContribution) * 100) / 100;
+
+    return {
+        employeeContribution,
+        employerContribution,
+        totalContribution,
+        employeeRate,
+        employerRate
+    };
 }
 
 exports.getPayroll = async (req, res) => {
@@ -25,7 +58,11 @@ exports.getPayroll = async (req, res) => {
         const companyId = req.user.company_id;
         
         let query = `
-            SELECT p.*, e.name, e.custom_id as custom_employee_id, e.photo, e.salary_rate
+            SELECT p.*, 
+                   COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0) as employee_contribution,
+                   COALESCE(p.employer_contribution, p.cpf_employer, 0) as employer_contribution,
+                   COALESCE(p.total_contribution, p.cpf_total, COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0) + COALESCE(p.employer_contribution, p.cpf_employer, 0), 0) as total_contribution,
+                   e.name, e.custom_id as custom_employee_id, e.photo, e.salary_rate
             FROM payroll p
             JOIN employees e ON p.employee_id = e.id
         `;
@@ -48,7 +85,12 @@ exports.getPayroll = async (req, res) => {
         // Map db fields to UI expected fields
         const formatted = rows.map(r => ({
             ...r,
-            employee_id: r.custom_employee_id || r.employee_id
+            employee_id: r.custom_employee_id || r.employee_id,
+            // Backwards compatibility mappings for older frontend widgets
+            cpf_employee: r.employee_contribution,
+            cpf_employer: r.employer_contribution,
+            cpf_total: r.total_contribution,
+            uif_amount: r.employee_contribution
         }));
         res.json(formatted);
     } catch (err) {
@@ -150,18 +192,11 @@ exports.generatePayroll = async (req, res) => {
                 deductions = lateCount * lateDeductionAmount;
             }
 
-            // CPF Calculation (replaces UIF 1%)
-            console.log(`Calculating for emp ${emp.id}: baseSalary=${baseSalary}`);
-            const cpfRates = getCpfRates(emp.date_of_birth);
-            let cpfEmployee = 0, cpfEmployer = 0, cpfTotal = 0;
-            if (cpfRates && baseSalary > 750) {
-                const cpfBase = Math.min(baseSalary, CPF_OW_CEILING);
-                cpfEmployee = Math.round(cpfBase * cpfRates.employee * 100) / 100;
-                cpfEmployer = Math.round(cpfBase * cpfRates.employer * 100) / 100;
-                cpfTotal = Math.round(cpfBase * cpfRates.total * 100) / 100;
-            }
-            // Employee CPF is a deduction from salary (like old UIF)
-            deductions += cpfEmployee;
+            // Configurable Multi-Country Employee & Employer Contributions
+            const { employeeContribution, employerContribution, totalContribution } = calculateContributions(baseSalary, emp, settings);
+            
+            // Employee contribution is a deduction from salary
+            deductions += employeeContribution;
 
             let advanceDeduction = 0;
             const advanceBalance = parseFloat(emp.advance_balance || 0);
@@ -170,12 +205,13 @@ exports.generatePayroll = async (req, res) => {
             let provisionalNet = baseSalary - deductions;
 
             if (advanceBalance > 0 && provisionalNet > 0) {
-                // Deduct as much as possible, up to the remaining advance balance
+                // Deduct configured installment or default to 10% per cycle
                 let maxPossible = Math.min(advanceBalance, provisionalNet);
                 if (advanceInstallment !== null && advanceInstallment > 0) {
                     advanceDeduction = Math.min(advanceInstallment, maxPossible);
                 } else {
-                    advanceDeduction = maxPossible;
+                    const default10Percent = Math.max(1, Math.round(advanceBalance * 0.10 * 100) / 100);
+                    advanceDeduction = Math.min(default10Percent, maxPossible);
                 }
             }
 
@@ -203,11 +239,17 @@ exports.generatePayroll = async (req, res) => {
             const [insertResult] = await db.execute(`
                 INSERT INTO payroll (
                     company_id, employee_id, cycle_start, cycle_end, 
-                    total_hours, base_salary, deductions, uif_amount, cpf_employee, cpf_employer, cpf_total, advance_deduction, net_salary, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    total_hours, base_salary, deductions, 
+                    employee_contribution, employer_contribution, total_contribution,
+                    uif_amount, cpf_employee, cpf_employer, cpf_total,
+                    advance_deduction, net_salary, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             `, [
                 companyId, emp.id, startDate, endDate, 
-                totalHours, baseSalary, deductions, cpfEmployee, cpfEmployee, cpfEmployer, cpfTotal, advanceDeduction, netSalary
+                totalHours, baseSalary, deductions, 
+                employeeContribution, employerContribution, totalContribution,
+                employeeContribution, employeeContribution, employerContribution, totalContribution,
+                advanceDeduction, netSalary
             ]);
             
             const payrollId = insertResult.insertId;
@@ -220,6 +262,14 @@ exports.generatePayroll = async (req, res) => {
                     cycle_end: endDate,
                     base_salary: baseSalary,
                     deductions: deductions,
+                    employee_contribution: employeeContribution,
+                    employer_contribution: employerContribution,
+                    total_contribution: totalContribution,
+                    cpf_employee: employeeContribution,
+                    cpf_employer: employerContribution,
+                    cpf_total: totalContribution,
+                    uif_amount: employeeContribution,
+                    advance_deduction: advanceDeduction,
                     net_salary: netSalary
                 };
                 
@@ -228,7 +278,6 @@ exports.generatePayroll = async (req, res) => {
                 await db.execute('UPDATE payroll SET pdf_path = ? WHERE id = ?', [pdfPath, payrollId]);
             } catch (pdfError) {
                 console.error(`Failed to generate PDF for employee ${emp.id}:`, pdfError);
-                // We don't throw here, payroll computation is still successful
             }
 
             generated++;
@@ -293,7 +342,12 @@ exports.generateSinglePdf = async (req, res) => {
         const [payrollRows] = await db.execute('SELECT * FROM payroll WHERE id = ?', [id]);
         if (payrollRows.length === 0) return res.status(404).json({ error: 'Payroll record not found' });
         
-        const payrollData = payrollRows[0];
+        const payrollData = {
+            ...payrollRows[0],
+            employee_contribution: payrollRows[0].employee_contribution || payrollRows[0].cpf_employee || payrollRows[0].uif_amount || 0,
+            employer_contribution: payrollRows[0].employer_contribution || payrollRows[0].cpf_employer || 0,
+            total_contribution: payrollRows[0].total_contribution || payrollRows[0].cpf_total || (parseFloat(payrollRows[0].employee_contribution || payrollRows[0].cpf_employee || 0) + parseFloat(payrollRows[0].employer_contribution || payrollRows[0].cpf_employer || 0))
+        };
 
         if (req.user.role !== 'MasterAdmin' && req.user.company_id !== payrollData.company_id) {
             return res.status(403).json({ error: 'Unauthorized to access this record' });
@@ -334,11 +388,14 @@ exports.getLiveAccrual = async (req, res) => {
         const startDate = `${year}-${month}-01`;
         const endDate = `${year}-${month}-${String(now.getDate()).padStart(2, '0')}`;
 
-        // Get Employee Details (include date_of_birth for CPF)
-        const [empRows] = await db.execute('SELECT salary_rate, salary_type, advance_balance, date_of_birth FROM employees WHERE id = ?', [employeeId]);
+        // Get Employee Details
+        const [empRows] = await db.execute('SELECT salary_rate, salary_type, advance_balance, date_of_birth, company_id, contribution_applicable, employee_contribution_percentage, employer_contribution_percentage FROM employees WHERE id = ?', [employeeId]);
         if (empRows.length === 0) return res.json({ liveEarnings: 0, startDate, endDate, totalHours: 0 });
         const emp = empRows[0];
         const salaryRate = parseFloat(emp.salary_rate || 0);
+
+        let [settingsRows] = await db.execute('SELECT * FROM settings WHERE company_id = ?', [emp.company_id || req.user.company_id]);
+        let settings = settingsRows[0] || {};
 
         // Get Attendance Stats
         const [attRows] = await db.execute(`
@@ -360,17 +417,10 @@ exports.getLiveAccrual = async (req, res) => {
             liveEarnings = (dayRows[0].days || 0) * salaryRate;
         }
 
-        // CPF calculation (replaces flat UIF 1%)
-        const cpfRates = getCpfRates(emp.date_of_birth);
-        let cpfEmployee = 0, cpfEmployer = 0, cpfTotal = 0;
-        if (cpfRates && liveEarnings > 750) {
-            const cpfBase = Math.min(liveEarnings, CPF_OW_CEILING);
-            cpfEmployee = Math.round(cpfBase * cpfRates.employee * 100) / 100;
-            cpfEmployer = Math.round(cpfBase * cpfRates.employer * 100) / 100;
-            cpfTotal = Math.round(cpfBase * cpfRates.total * 100) / 100;
-        }
+        // Configurable Contribution Calculation
+        const { employeeContribution, employerContribution, totalContribution, employeeRate, employerRate } = calculateContributions(liveEarnings, emp, settings);
         const advanceDeduction = parseFloat(emp.advance_balance || 0);
-        const netSalary = Math.max(0, liveEarnings - cpfEmployee - advanceDeduction);
+        const netSalary = Math.max(0, liveEarnings - employeeContribution - advanceDeduction);
 
         res.json({
             startDate,
@@ -379,11 +429,15 @@ exports.getLiveAccrual = async (req, res) => {
             totalHours,
             salaryRate,
             salaryType: emp.salary_type,
-            cpfEmployee,
-            cpfEmployer,
-            cpfTotal,
-            cpfAge: cpfRates ? cpfRates.age : null,
-            cpfMissing: !cpfRates,
+            employeeContribution,
+            employerContribution,
+            totalContribution,
+            employeeRate,
+            employerRate,
+            // Backwards compatibility keys
+            cpfEmployee: employeeContribution,
+            cpfEmployer: employerContribution,
+            cpfTotal: totalContribution,
             advanceDeduction,
             netSalary
         });
@@ -392,3 +446,6 @@ exports.getLiveAccrual = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
+exports.calculateContributions = calculateContributions;
+

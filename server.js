@@ -53,7 +53,13 @@ const io = new Server(server, {
 // IMPORTANT: CORS must be applied before Rate Limiting!
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ 
+    limit: '50mb',
+    verify: (req, res, buf) => {
+        req.rawBody = buf; // Preserves raw buffer for Razorpay webhook signature verification
+    }
+}));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ─── Security: Rate Limiting ───
 const generalLimiter = rateLimit({
@@ -93,13 +99,23 @@ app.use('/uploads/payslips/:filename', async (req, res, next) => {
     const filename = req.params.filename;
     const filePath = path.join(__dirname, 'uploads', 'payslips', filename);
 
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.removeHeader('X-Frame-Options');
+
+    // If file exists and is a valid binary PDF (starts with %PDF)
     if (fs.existsSync(filePath)) {
-        return next(); // File exists, let static handler serve it
+        try {
+            const buffer = fs.readFileSync(filePath, { encoding: null, flag: 'r' });
+            if (buffer.length > 10 && buffer.slice(0, 4).toString() === '%PDF') {
+                return res.sendFile(filePath);
+            }
+        } catch (readErr) {}
     }
 
-    // File missing on disk -> Auto-regenerate on the fly!
+    // File missing on disk or was invalid HTML -> Auto-regenerate on the fly!
     try {
-        console.log(`⚠️ Missing payslip PDF requested: ${filename}. Auto-regenerating on the fly...`);
+        console.log(`⚠️ Regenerating payslip PDF requested: ${filename}...`);
         const searchPath = `%${filename}`;
         const [payrollRows] = await db.execute('SELECT * FROM payroll WHERE pdf_path LIKE ? LIMIT 1', [searchPath]);
 
@@ -135,16 +151,26 @@ app.use('/uploads/payslips/:filename', async (req, res, next) => {
     }
 });
 
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+    setHeaders: (res, filePath) => {
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.removeHeader('X-Frame-Options');
+        if (filePath.endsWith('.pdf')) {
+            res.setHeader('Content-Type', 'application/pdf');
+        }
+    }
+}));
 
 const apiRoutes = require('./routes/api');
 const superadminRoutes = require('./routes/superadmin.routes');
 const internalRoutes = require('./routes/internal.routes');
+const paymentRoutes = require('./routes/payment.routes');
 
 // ─── Apply auth rate limiter to login/register routes ───
 app.use('/api/login', authLimiter);
 app.use('/api/register', authLimiter);
 
+app.use('/api/payment', paymentRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/internal', internalRoutes);
 app.use('/api', apiRoutes);
@@ -440,10 +466,22 @@ const initDB = async () => {
             // Employee Date of Birth (for CPF age-based calculation)
             { table: 'employees', column: 'date_of_birth', type: 'DATE DEFAULT NULL' },
 
-            // CPF Contribution columns on Payroll
+            // Contribution columns on Settings, Employees, and Payroll
+            { table: 'settings', column: 'contribution_enabled', type: 'TINYINT(1) DEFAULT 0' },
+            { table: 'settings', column: 'default_employee_contribution_percentage', type: 'DECIMAL(5,2) DEFAULT 0.00' },
+            { table: 'settings', column: 'default_employer_contribution_percentage', type: 'DECIMAL(5,2) DEFAULT 0.00' },
+            { table: 'employees', column: 'contribution_applicable', type: 'TINYINT(1) DEFAULT 0' },
+            { table: 'employees', column: 'employee_contribution_percentage', type: 'DECIMAL(5,2) DEFAULT NULL' },
+            { table: 'employees', column: 'employer_contribution_percentage', type: 'DECIMAL(5,2) DEFAULT NULL' },
+            { table: 'payroll', column: 'employee_contribution', type: 'DECIMAL(10,2) DEFAULT 0.00' },
+            { table: 'payroll', column: 'employer_contribution', type: 'DECIMAL(10,2) DEFAULT 0.00' },
+            { table: 'payroll', column: 'total_contribution', type: 'DECIMAL(10,2) DEFAULT 0.00' },
             { table: 'payroll', column: 'cpf_employee', type: 'DECIMAL(10,2) DEFAULT 0.00' },
             { table: 'payroll', column: 'cpf_employer', type: 'DECIMAL(10,2) DEFAULT 0.00' },
-            { table: 'payroll', column: 'cpf_total', type: 'DECIMAL(10,2) DEFAULT 0.00' }
+            { table: 'payroll', column: 'cpf_total', type: 'DECIMAL(10,2) DEFAULT 0.00' },
+
+            // Global Settings powered_by
+            { table: 'global_settings', column: 'powered_by', type: 'VARCHAR(255) DEFAULT "Kiaan Technology"' }
         ];
 
         for (const col of columns) {
@@ -601,6 +639,23 @@ const initDB = async () => {
         `);
 
         await db.execute(`
+            CREATE TABLE IF NOT EXISTS company_email_settings (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                company_id BIGINT NOT NULL,
+                smtp_host VARCHAR(255) NOT NULL,
+                smtp_port INT NOT NULL,
+                smtp_user VARCHAR(255) NOT NULL,
+                smtp_pass TEXT NOT NULL,
+                sender_email VARCHAR(255) NOT NULL,
+                sender_name VARCHAR(100) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_company (company_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `);
+
+        await db.execute(`
             CREATE TABLE IF NOT EXISTS email_logs (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 payroll_id INT,
@@ -643,6 +698,11 @@ const initDB = async () => {
                 FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
             )
         `);
+
+        // Ensure advance_installment column on employees
+        try {
+            await db.execute('ALTER TABLE employees ADD COLUMN advance_installment DECIMAL(10,2) DEFAULT NULL');
+        } catch (e) {}
 
         console.log('✅ New module tables checked/created');
 

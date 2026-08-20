@@ -42,10 +42,13 @@ exports.getAllEmployees = async (req, res) => {
         let query = `
             SELECT e.*, 
                    CASE WHEN fe.id IS NOT NULL THEN 1 ELSE 0 END as has_face_registered,
-                   COALESCE((SELECT SUM(COALESCE(p.cpf_employee, p.uif_amount)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_uif_collected,
-                   COALESCE((SELECT SUM(COALESCE(p.cpf_employee, p.uif_amount)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_employee,
-                   COALESCE((SELECT SUM(COALESCE(p.cpf_employer, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_employer,
-                   COALESCE((SELECT SUM(COALESCE(p.cpf_total, COALESCE(p.cpf_employee, p.uif_amount))) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_total
+                   COALESCE((SELECT SUM(COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_employee_contribution,
+                   COALESCE((SELECT SUM(COALESCE(p.employer_contribution, p.cpf_employer, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_employer_contribution,
+                   COALESCE((SELECT SUM(COALESCE(p.total_contribution, p.cpf_total, COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0) + COALESCE(p.employer_contribution, p.cpf_employer, 0))) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_contribution_total,
+                   COALESCE((SELECT SUM(COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_employee,
+                   COALESCE((SELECT SUM(COALESCE(p.employer_contribution, p.cpf_employer, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_employer,
+                   COALESCE((SELECT SUM(COALESCE(p.total_contribution, p.cpf_total, COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0) + COALESCE(p.employer_contribution, p.cpf_employer, 0))) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_cpf_total,
+                   COALESCE((SELECT SUM(COALESCE(p.employee_contribution, p.cpf_employee, p.uif_amount, 0)) FROM payroll p WHERE p.employee_id = e.id AND p.status = 'paid'), 0) as total_uif_collected
             FROM employees e
             LEFT JOIN face_embeddings fe ON e.id = fe.employee_id
             WHERE 1=1
@@ -136,7 +139,11 @@ exports.addEmployee = async (req, res) => {
         const dbShift = ['Morning Shift', 'Evening Shift', 'Night Shift'].includes(shift) ? shift : 'Morning Shift';
         const dbSalaryType = ['hourly', 'daily', 'monthly'].includes(salary_type) ? salary_type : 'hourly';
 
-        const empSql = 'INSERT INTO employees (machine_id, custom_id, name, role, department, shift, email, phone, salary_rate, salary_type, joined_date, date_of_birth, photo, uif_number, advance_balance, signature, created_by, is_uif_registered, company_id, assigned_branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+        const isContribApplicable = (req.body.contribution_applicable === 'true' || req.body.contribution_applicable === true || req.body.contribution_applicable === 1 || req.body.contribution_applicable === '1') ? 1 : 0;
+        const empContribPct = (req.body.employee_contribution_percentage !== undefined && req.body.employee_contribution_percentage !== '' && req.body.employee_contribution_percentage !== null) ? parseFloat(req.body.employee_contribution_percentage) : null;
+        const empyrContribPct = (req.body.employer_contribution_percentage !== undefined && req.body.employer_contribution_percentage !== '' && req.body.employer_contribution_percentage !== null) ? parseFloat(req.body.employer_contribution_percentage) : null;
+
+        const empSql = 'INSERT INTO employees (machine_id, custom_id, name, role, department, shift, email, phone, salary_rate, salary_type, joined_date, date_of_birth, photo, uif_number, advance_balance, signature, created_by, is_uif_registered, company_id, assigned_branch, contribution_applicable, employee_contribution_percentage, employer_contribution_percentage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         const formattedDOB = date_of_birth ? date_of_birth.split('T')[0] : null;
         const empValues = [
             nextMachineId.toString(),
@@ -158,7 +165,10 @@ exports.addEmployee = async (req, res) => {
             creatorId,
             (is_uif_registered === 'true' || is_uif_registered === true || is_uif_registered === 1 || is_uif_registered === '1') ? 1 : 0,
             req.user.company_id,
-            req.body.assigned_branch || null
+            req.body.assigned_branch || null,
+            isContribApplicable,
+            empContribPct,
+            empyrContribPct
         ];
 
         console.log('📝 Saving Signature to DB. Length:', signature ? signature.length : 'EMPTY');
@@ -293,6 +303,21 @@ exports.updateEmployee = async (req, res) => {
             const isUif = data.is_uif_registered === 'true' || data.is_uif_registered === true || data.is_uif_registered === 1 || data.is_uif_registered === '1';
             empUpdates.push('`is_uif_registered` = ?');
             empParams.push(isUif ? 1 : 0);
+        }
+        if (data.contribution_applicable !== undefined) {
+            const isContrib = data.contribution_applicable === 'true' || data.contribution_applicable === true || data.contribution_applicable === 1 || data.contribution_applicable === '1';
+            empUpdates.push('`contribution_applicable` = ?');
+            empParams.push(isContrib ? 1 : 0);
+        }
+        if (data.employee_contribution_percentage !== undefined) {
+            empUpdates.push('`employee_contribution_percentage` = ?');
+            const p = parseFloat(data.employee_contribution_percentage);
+            empParams.push(isNaN(p) || data.employee_contribution_percentage === '' || data.employee_contribution_percentage === null ? null : p);
+        }
+        if (data.employer_contribution_percentage !== undefined) {
+            empUpdates.push('`employer_contribution_percentage` = ?');
+            const p = parseFloat(data.employer_contribution_percentage);
+            empParams.push(isNaN(p) || data.employer_contribution_percentage === '' || data.employer_contribution_percentage === null ? null : p);
         }
         if (data.joined_date) { empUpdates.push('`joined_date` = ?'); empParams.push(data.joined_date.split('T')[0]); }
 

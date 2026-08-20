@@ -50,39 +50,39 @@ const runExpiryChecks = async () => {
 
             // Paid Plans: Standard alerts for 7, 3, and 1 day left
             if (daysLeft === 7) {
-                await notificationsUtil.checkAndNotify('systemCompanyExpiry', {
+                await notificationsUtil.createNotification({
                     company_id: sub.company_id,
-                    title: 'Subscription Expiring Soon',
+                    title: 'Subscription Expiring Soon (7 Days)',
                     message: `Your subscription for ${sub.company_name} will expire in 7 days. Please renew to avoid interruption.`,
                     type: 'warning'
                 });
-                await notificationsUtil.checkAndNotify('systemCompanyExpiry', {
+                await notificationsUtil.createNotification({
                     company_id: null,
                     title: 'Company Subscription Expiring Soon',
                     message: `${sub.company_name}'s subscription will expire in 7 days.`,
                     type: 'warning'
                 });
             } else if (daysLeft === 3) {
-                await notificationsUtil.checkAndNotify('systemExpiry3Day', {
+                await notificationsUtil.createNotification({
                     company_id: sub.company_id,
                     title: 'Subscription Expiring in 3 Days',
                     message: `Your subscription for ${sub.company_name} will expire in 3 days. Please renew immediately.`,
                     type: 'warning'
                 });
-                await notificationsUtil.checkAndNotify('systemExpiry3Day', {
+                await notificationsUtil.createNotification({
                     company_id: null,
                     title: 'Company Subscription Expiring in 3 Days',
                     message: `${sub.company_name}'s subscription will expire in 3 days.`,
                     type: 'warning'
                 });
             } else if (daysLeft === 1) {
-                await notificationsUtil.checkAndNotify('systemExpiry1Day', {
+                await notificationsUtil.createNotification({
                     company_id: sub.company_id,
                     title: 'Subscription Expires Tomorrow',
-                    message: `URGENT: Your subscription for ${sub.company_name} expires tomorrow! All access will be restricted.`,
+                    message: `URGENT: Your subscription for ${sub.company_name} expires tomorrow! All access will be restricted upon expiry.`,
                     type: 'error'
                 });
-                await notificationsUtil.checkAndNotify('systemExpiry1Day', {
+                await notificationsUtil.createNotification({
                     company_id: null,
                     title: 'Company Subscription Expires Tomorrow',
                     message: `URGENT: ${sub.company_name}'s subscription expires tomorrow!`,

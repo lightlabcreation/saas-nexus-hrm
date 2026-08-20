@@ -3,19 +3,15 @@ const audit = require('../utils/audit');
 
 exports.getDashboardStats = async (req, res) => {
     try {
-        const isMaster = req.user.role && req.user.role.toLowerCase().includes('master');
-        const companyFilter = isMaster ? '' : `WHERE created_by = ${db.escape(req.user.id)}`;
+        const [companies] = await db.execute(`SELECT COUNT(*) as total FROM companies WHERE status != '' AND company_name != ''`);
+        const [activeCompanies] = await db.execute(`SELECT COUNT(*) as active FROM companies WHERE status = 'active' AND company_name != ''`);
+        const [revenue] = await db.execute(`SELECT SUM(s.amount) as total FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE s.payment_status = 'paid'`);
+        const [admins] = await db.execute(`SELECT COUNT(*) as total FROM users u LEFT JOIN companies c ON u.company_id = c.id WHERE u.role IN ('admin', 'Master Admin', 'superadmin')`);
+        const [employees] = await db.execute(`SELECT COUNT(*) as total FROM employees e LEFT JOIN companies c ON e.company_id = c.id WHERE e.status = 'active'`);
+        const [attendance] = await db.execute(`SELECT COUNT(*) as present FROM attendance a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN companies c ON e.company_id = c.id WHERE a.date = CURDATE() AND a.status IN ('present', 'late', 'half_day')`);
+        const [activePlans] = await db.execute(`SELECT COUNT(*) as active FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE s.payment_status = 'paid' AND s.end_date >= CURDATE()`);
         
-        const [companies] = await db.execute(`SELECT COUNT(*) as total FROM companies ${companyFilter}`);
-        const [activeCompanies] = await db.execute(`SELECT COUNT(*) as active FROM companies WHERE status = "active" ${isMaster ? '' : `AND created_by = ${db.escape(req.user.id)}`}`);
-        const [revenue] = await db.execute(`SELECT SUM(s.amount) as total FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE s.payment_status = "paid" ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`);
-        const [admins] = await db.execute(`SELECT COUNT(*) as total FROM users u LEFT JOIN companies c ON u.company_id = c.id WHERE u.role IN ("admin", "Master Admin") ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`);
-        const [employees] = await db.execute(`SELECT COUNT(*) as total FROM employees e LEFT JOIN companies c ON e.company_id = c.id WHERE e.status = "active" ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`);
-        const [attendance] = await db.execute(`SELECT COUNT(*) as present FROM attendance a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN companies c ON e.company_id = c.id WHERE a.date = CURDATE() AND a.status IN ("present", "late", "half_day") ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`);
-        const [activePlans] = await db.execute(`SELECT COUNT(*) as active FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE s.payment_status = "paid" AND s.end_date >= CURDATE() ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`);
-        
-        const filterCondition = isMaster ? `WHERE u.role IN ('superadmin', 'Master Admin', 'system') OR u.id IS NULL` : `WHERE c.created_by = ${db.escape(req.user.id)} AND u.role IN ('superadmin', 'Master Admin', 'system')`;
-        const [recentActivity] = await db.execute(`SELECT a.* FROM audit_logs a LEFT JOIN users u ON a.admin_id = u.id LEFT JOIN companies c ON u.company_id = c.id ${filterCondition} ORDER BY a.created_at DESC LIMIT 5`);
+        const [recentActivity] = await db.execute(`SELECT a.* FROM audit_logs a LEFT JOIN users u ON a.admin_id = u.id LEFT JOIN companies c ON u.company_id = c.id ORDER BY a.created_at DESC LIMIT 5`);
 
         const days = parseInt(req.query.days) || 7;
         const chartData = [];
@@ -24,8 +20,8 @@ exports.getDashboardStats = async (req, res) => {
             d.setDate(d.getDate() - i);
             const dStr = d.toISOString().split('T')[0];
             
-            const [signupsResult] = await db.execute(`SELECT COUNT(*) as count FROM companies WHERE DATE(created_at) = ? ${isMaster ? '' : `AND created_by = ${db.escape(req.user.id)}`}`, [dStr]);
-            const [revenueResult] = await db.execute(`SELECT SUM(s.amount) as total FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE DATE(s.created_at) = ? AND s.payment_status="paid" ${isMaster ? '' : `AND c.created_by = ${db.escape(req.user.id)}`}`, [dStr]);
+            const [signupsResult] = await db.execute(`SELECT COUNT(*) as count FROM companies WHERE DATE(created_at) = ? AND status != '' AND company_name != ''`, [dStr]);
+            const [revenueResult] = await db.execute(`SELECT SUM(s.amount) as total FROM subscriptions s LEFT JOIN companies c ON s.company_id = c.id WHERE DATE(s.created_at) = ? AND s.payment_status='paid'`, [dStr]);
 
             let label = d.toLocaleDateString('en-US', { weekday: 'short' });
             if (days > 7) {
@@ -57,10 +53,19 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getCompanies = async (req, res) => {
     try {
-        const isMaster = req.user.role && req.user.role.toLowerCase().includes('master');
         const [rows] = await db.execute(`
-            SELECT c.*,                s.plan_name as active_plan,                s.amount as plan_amount,                s.end_date as plan_expiry,                s.payment_status as plan_status,                s.created_at as plan_created_at,                s.billing_cycle as plan_billing_cycle,                (SELECT COUNT(*) FROM employees WHERE company_id = c.id) as employee_count,                (SELECT COUNT(*) FROM users WHERE company_id = c.id AND role IN ('admin', 'Master Admin')) as admin_count         FROM companies c         LEFT JOIN subscriptions s ON c.id = s.company_id AND s.id = (SELECT MAX(id) FROM subscriptions WHERE company_id = c.id)
-            ${isMaster ? '' : `WHERE c.created_by = ${db.escape(req.user.id)}`}
+            SELECT c.*,
+                   s.plan_name as active_plan,
+                   s.amount as plan_amount,
+                   s.end_date as plan_expiry,
+                   s.payment_status as plan_status,
+                   s.created_at as plan_created_at,
+                   s.billing_cycle as plan_billing_cycle,
+                   (SELECT COUNT(*) FROM employees WHERE company_id = c.id) as employee_count,
+                   (SELECT COUNT(*) FROM users WHERE company_id = c.id AND role IN ('admin', 'Master Admin')) as admin_count
+            FROM companies c
+            LEFT JOIN subscriptions s ON c.id = s.company_id AND s.id = (SELECT MAX(id) FROM subscriptions WHERE company_id = c.id)
+            WHERE c.status != '' AND c.company_name != ''
             ORDER BY c.created_at DESC
         `);
         res.json(rows);
@@ -475,13 +480,15 @@ exports.rejectRequest = async (req, res) => {
 
 exports.getInvoices = async (req, res) => {
     try {
-        const isMaster = req.user.role && req.user.role.toLowerCase().includes('master');
         const [rows] = await db.execute(`
-            SELECT s.*, c.company_name 
-            FROM subscriptions s 
-            LEFT JOIN companies c ON s.company_id = c.id 
-            ${isMaster ? '' : `WHERE c.created_by = ${db.escape(req.user.id)}`}
-            ORDER BY s.created_at DESC
+            SELECT i.*, 
+                   COALESCE(c.company_name, i.company_name, 'Unknown Company') as company_name,
+                   COALESCE(c.email, i.customer_email) as customer_email,
+                   COALESCE(c.phone, i.customer_phone) as customer_phone,
+                   COALESCE(c.owner_name, i.customer_name) as customer_name
+            FROM invoices i 
+            LEFT JOIN companies c ON i.company_id = c.id 
+            ORDER BY i.created_at DESC
         `);
         res.json(rows);
     } catch (err) {
@@ -489,8 +496,77 @@ exports.getInvoices = async (req, res) => {
     }
 };
 
+exports.getPaymentHistory = async (req, res) => {
+    try {
+        const [invoices] = await db.execute(`
+            SELECT i.*, 
+                   COALESCE(c.company_name, i.company_name, 'Direct Customer') as company_name,
+                   COALESCE(c.email, i.customer_email) as customer_email,
+                   COALESCE(c.phone, i.customer_phone) as customer_phone,
+                   COALESCE(c.owner_name, i.customer_name) as customer_name,
+                   s.end_date as subscription_end_date
+            FROM invoices i 
+            LEFT JOIN companies c ON i.company_id = c.id 
+            LEFT JOIN subscriptions s ON i.subscription_id = s.id
+            ORDER BY i.created_at DESC
+        `);
+
+        // Calculate Revenue and Stats
+        const [[stats]] = await db.execute(`
+            SELECT 
+                COUNT(*) as total_count,
+                COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN amount ELSE 0 END), 0) as total_revenue,
+                COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END), 0) as paid_count,
+                COALESCE(SUM(CASE WHEN payment_status != 'paid' THEN 1 ELSE 0 END), 0) as failed_count,
+                COUNT(DISTINCT company_id) as total_paying_companies
+            FROM invoices
+        `);
+
+        res.json({
+            stats: {
+                totalRevenue: parseFloat(stats.total_revenue || 0),
+                totalTransactions: parseInt(stats.total_count || 0),
+                paidTransactions: parseInt(stats.paid_count || 0),
+                failedTransactions: parseInt(stats.failed_count || 0),
+                payingCompanies: parseInt(stats.total_paying_companies || 0)
+            },
+            invoices
+        });
+    } catch (err) {
+        console.error('getPaymentHistory Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
 exports.getPayments = async (req, res) => {
     res.json([]);
+};
+
+exports.recordPayment = async (req, res) => {
+    try {
+        const { company_id, plan_name, amount, billing_cycle } = req.body;
+        let days = 30;
+        if (billing_cycle === 'weekly') days = 7;
+        else if (billing_cycle === 'quarterly') days = 90;
+        else if (billing_cycle === 'half-yearly') days = 180;
+        else if (billing_cycle === 'annually' || billing_cycle === 'yearly') days = 365;
+
+        const [result] = await db.execute(`
+            INSERT INTO subscriptions (company_id, plan_name, amount, billing_cycle, payment_status, start_date, end_date)
+            VALUES (?, ?, ?, ?, 'paid', CURDATE(), DATE_ADD(CURDATE(), INTERVAL ? DAY))
+        `, [company_id, plan_name, amount || 0, billing_cycle || 'monthly', days]);
+
+        const invoiceNumber = `INV-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+        await db.execute(`
+            INSERT INTO invoices (invoice_number, company_id, subscription_id, plan_name, billing_cycle, amount, payment_status, payment_method, invoice_date)
+            VALUES (?, ?, ?, ?, ?, ?, 'paid', 'manual_record', CURDATE())
+        `, [invoiceNumber, company_id, result.insertId, plan_name, billing_cycle || 'monthly', amount || 0]);
+
+        res.json({ message: 'Payment recorded successfully', invoiceNumber });
+    } catch (err) {
+        console.error('recordPayment Error:', err);
+        res.status(500).json({ error: err.message });
+    }
 };
 
 exports.getAnalytics = async (req, res) => {
@@ -661,8 +737,7 @@ exports.handlePlanRequest = async (req, res) => {
 
 exports.getPlans = async (req, res) => {
     try {
-        const isMaster = req.user.role && req.user.role.toLowerCase().includes('master');
-        const [rows] = await db.execute(`SELECT * FROM plans ${isMaster ? '' : `WHERE created_by = ${db.escape(req.user.id)}`} ORDER BY id ASC`);
+        const [rows] = await db.execute('SELECT * FROM plans ORDER BY id ASC');
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });

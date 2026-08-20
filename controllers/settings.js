@@ -92,7 +92,8 @@ exports.updateSettings = async (req, res) => {
         business_name, business_address, business_phone, business_email,
         admin_password, currency, timezone, date_format, language,
         grace_period_mins, standard_end_time, weekends,
-        notify_leaves, notify_claims, notify_password_resets
+        notify_leaves, notify_claims, notify_password_resets,
+        contribution_enabled, default_employee_contribution_percentage, default_employer_contribution_percentage
     } = req.body;
     
     const companyId = req.user.company_id;
@@ -111,7 +112,10 @@ exports.updateSettings = async (req, res) => {
             grace_period_mins, standard_end_time, weekends,
             notify_leaves: notify_leaves !== undefined ? (notify_leaves ? 1 : 0) : undefined,
             notify_claims: notify_claims !== undefined ? (notify_claims ? 1 : 0) : undefined,
-            notify_password_resets: notify_password_resets !== undefined ? (notify_password_resets ? 1 : 0) : undefined
+            notify_password_resets: notify_password_resets !== undefined ? (notify_password_resets ? 1 : 0) : undefined,
+            contribution_enabled: contribution_enabled !== undefined ? (contribution_enabled ? 1 : 0) : undefined,
+            default_employee_contribution_percentage: default_employee_contribution_percentage !== undefined ? parseFloat(default_employee_contribution_percentage || 0) : undefined,
+            default_employer_contribution_percentage: default_employer_contribution_percentage !== undefined ? parseFloat(default_employer_contribution_percentage || 0) : undefined
         };
 
         Object.keys(fields).forEach(key => {
@@ -136,8 +140,8 @@ exports.updateSettings = async (req, res) => {
                     
                     const insertSql = `
                         INSERT INTO settings 
-                        (company_id, machine_ip, machine_port, machine_alias, sync_interval, late_deduction, late_deduction_amount, salary_cycle, salary_cycle_start_date, ot_multiplier, business_name, business_address, business_phone, business_email, standard_start_time, timezone, currency, date_format, language, grace_period_mins, standard_end_time, weekends, notify_leaves, notify_claims, notify_password_resets)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (company_id, machine_ip, machine_port, machine_alias, sync_interval, late_deduction, late_deduction_amount, salary_cycle, salary_cycle_start_date, ot_multiplier, business_name, business_address, business_phone, business_email, standard_start_time, timezone, currency, date_format, language, grace_period_mins, standard_end_time, weekends, notify_leaves, notify_claims, notify_password_resets, contribution_enabled, default_employee_contribution_percentage, default_employer_contribution_percentage)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     `;
                     const insertParams = [
                         companyId,
@@ -164,7 +168,10 @@ exports.updateSettings = async (req, res) => {
                         defaultSettings.weekends || 'Saturday,Sunday',
                         defaultSettings.notify_leaves !== undefined ? defaultSettings.notify_leaves : 1,
                         defaultSettings.notify_claims !== undefined ? defaultSettings.notify_claims : 1,
-                        defaultSettings.notify_password_resets !== undefined ? defaultSettings.notify_password_resets : 1
+                        defaultSettings.notify_password_resets !== undefined ? defaultSettings.notify_password_resets : 1,
+                        defaultSettings.contribution_enabled || 0,
+                        defaultSettings.default_employee_contribution_percentage || 0.00,
+                        defaultSettings.default_employer_contribution_percentage || 0.00
                     ];
                     await db.execute(insertSql, insertParams);
                 }
@@ -229,7 +236,7 @@ exports.getGlobalSettings = async (req, res) => {
 exports.updateGlobalSettings = async (req, res) => {
     try {
         const {
-            platform_name, support_email, timezone, currency, date_format, language, notifications,
+            platform_name, powered_by, support_email, timezone, currency, date_format, language, notifications,
             company_name, company_logo, company_address, contact_number, about_us,
             social_linkedin, social_facebook, social_instagram, social_twitter, social_youtube,
             privacy_policy, terms_conditions, copyright_text, whatsapp_number
@@ -241,13 +248,13 @@ exports.updateGlobalSettings = async (req, res) => {
         if (rows.length > 0) {
             await db.execute(
                 `UPDATE global_settings SET 
-                    platform_name=?, support_email=?, timezone=?, currency=?, date_format=?, language=?, notifications=?,
+                    platform_name=?, powered_by=?, support_email=?, timezone=?, currency=?, date_format=?, language=?, notifications=?,
                     company_name=?, company_logo=?, company_address=?, contact_number=?, about_us=?,
                     social_linkedin=?, social_facebook=?, social_instagram=?, social_twitter=?, social_youtube=?,
                     privacy_policy=?, terms_conditions=?, copyright_text=?, whatsapp_number=?
                 WHERE id=?`,
                 [
-                    platform_name, support_email, timezone, currency, date_format, language, notifJson,
+                    platform_name, powered_by || 'Kiaan Technology', support_email, timezone, currency, date_format, language, notifJson,
                     company_name || null, company_logo || null, company_address || null, contact_number || null, about_us || null,
                     social_linkedin || null, social_facebook || null, social_instagram || null, social_twitter || null, social_youtube || null,
                     privacy_policy || null, terms_conditions || null, copyright_text || null, whatsapp_number || null,
@@ -257,13 +264,13 @@ exports.updateGlobalSettings = async (req, res) => {
         } else {
             await db.execute(
                 `INSERT INTO global_settings 
-                    (platform_name, support_email, timezone, currency, date_format, language, notifications,
+                    (platform_name, powered_by, support_email, timezone, currency, date_format, language, notifications,
                      company_name, company_logo, company_address, contact_number, about_us,
                      social_linkedin, social_facebook, social_instagram, social_twitter, social_youtube,
                      privacy_policy, terms_conditions, copyright_text, whatsapp_number) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    platform_name, support_email, timezone, currency, date_format, language, notifJson,
+                    platform_name, powered_by || 'Kiaan Technology', support_email, timezone, currency, date_format, language, notifJson,
                     company_name || null, company_logo || null, company_address || null, contact_number || null, about_us || null,
                     social_linkedin || null, social_facebook || null, social_instagram || null, social_twitter || null, social_youtube || null,
                     privacy_policy || null, terms_conditions || null, copyright_text || null, whatsapp_number || null
@@ -279,7 +286,7 @@ exports.updateGlobalSettings = async (req, res) => {
 exports.getSiteInfo = async (req, res) => {
     try {
         const [rows] = await db.execute(
-            `SELECT platform_name, support_email, company_name, company_logo, company_address, contact_number, about_us,
+            `SELECT platform_name, powered_by, support_email, company_name, company_logo, company_address, contact_number, about_us,
                     social_linkedin, social_facebook, social_instagram, social_twitter, social_youtube,
                     privacy_policy, terms_conditions, copyright_text, whatsapp_number
              FROM global_settings LIMIT 1`
@@ -292,6 +299,9 @@ exports.getSiteInfo = async (req, res) => {
 
 exports.getCurrentPlan = async (req, res) => {
     try {
+        const [compRows] = await db.execute('SELECT id, company_name, email, phone, status, plan, created_at FROM companies WHERE id = ?', [req.user.company_id]);
+        const comp = compRows[0] || {};
+
         const sql = `
             SELECT s.plan_name, s.end_date, s.payment_status, s.amount, s.billing_cycle, s.created_at
             FROM subscriptions s 
@@ -300,20 +310,28 @@ exports.getCurrentPlan = async (req, res) => {
         `;
         const [rows] = await db.execute(sql, [req.user.company_id]);
         if (rows.length === 0) {
-            const [compRows] = await db.execute('SELECT plan, created_at FROM companies WHERE id = ?', [req.user.company_id]);
-            if (compRows.length > 0) {
-                return res.json({ 
-                    plan_name: compRows[0].plan || 'LOW', 
-                    end_date: null, 
-                    payment_status: 'paid', 
-                    amount: 0, 
-                    billing_cycle: 'monthly',
-                    created_at: compRows[0].created_at 
-                });
-            }
-            return res.json({ plan_name: 'Free/Expired', end_date: null, payment_status: 'unpaid', amount: 0, billing_cycle: null });
+            return res.json({ 
+                plan_name: comp.plan || 'Free Trial', 
+                end_date: null, 
+                payment_status: 'paid', 
+                amount: 0, 
+                billing_cycle: 'weekly',
+                created_at: comp.created_at,
+                company_id: comp.id,
+                company_name: comp.company_name,
+                company_email: comp.email,
+                company_phone: comp.phone,
+                company_status: comp.status || 'active'
+            });
         }
-        res.json(rows[0]);
+        res.json({
+            ...rows[0],
+            company_id: comp.id,
+            company_name: comp.company_name,
+            company_email: comp.email,
+            company_phone: comp.phone,
+            company_status: comp.status || 'active'
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -325,19 +343,33 @@ exports.testUpdateSubscription = async (req, res) => {
         const compId = (req.user && req.user.company_id) ? req.user.company_id : null;
         
         let newCreatedAt;
+        let newEndDate;
         const now = new Date();
         
         if (status === '10sec') {
-            newCreatedAt = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000) + 10000);
-        } else if (status === '3days') {
-            newCreatedAt = new Date(now.getTime() - (27 * 24 * 60 * 60 * 1000));
-        } else if (status === 'renew') {
+            // Exactly 10 seconds remaining on 7-day cycle
+            newCreatedAt = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000) + 10000);
+            newEndDate = new Date(now.getTime() - (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+        } else if (status === '1day' || status === '1_day') {
+            // Exactly 24 hours (1 day) remaining on 7-day cycle
+            newCreatedAt = new Date(now.getTime() - (6 * 24 * 60 * 60 * 1000));
+            newEndDate = new Date(now.getTime() + (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+        } else if (status === 'expired') {
+            // Expired 1 day ago
+            newCreatedAt = new Date(now.getTime() - (8 * 24 * 60 * 60 * 1000));
+            newEndDate = new Date(now.getTime() - (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+        } else if (status === 'renew' || status === 'reset' || status === '7days') {
+            // Reset to full 7 days
             newCreatedAt = now;
+            newEndDate = new Date(now.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
         } else {
             return res.status(400).json({ error: 'Invalid status' });
         }
         
-        const [result] = await db.execute('UPDATE subscriptions SET created_at = ?, billing_cycle = "monthly" WHERE company_id = ? ORDER BY id DESC LIMIT 1', [newCreatedAt, compId]);
+        const [result] = await db.execute(
+            'UPDATE subscriptions SET created_at = ?, end_date = ?, billing_cycle = "weekly" WHERE company_id = ? ORDER BY id DESC LIMIT 1', 
+            [newCreatedAt, newEndDate, compId]
+        );
         if (result.affectedRows === 0) {
             await db.execute('UPDATE companies SET created_at = ? WHERE id = ?', [newCreatedAt, compId]);
         }

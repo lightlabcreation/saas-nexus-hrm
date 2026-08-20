@@ -433,15 +433,15 @@ exports.getDashboardStats = async (req, res) => {
             }
         });
 
-        // 4.5 Calculate Total Accumulated CPF (for Admin)
-        let cpfQuery = 'SELECT SUM(COALESCE(cpf_employee, uif_amount)) as total_cpf FROM payroll';
-        let cpfParams = [];
+        // 4.5 Calculate Total Accumulated Contributions (for Admin)
+        let contribQuery = 'SELECT SUM(COALESCE(employee_contribution, cpf_employee, uif_amount, 0)) as total_contribution FROM payroll';
+        let contribParams = [];
         if (req.user.role !== 'MasterAdmin') {
-            cpfQuery += ' WHERE company_id = ?';
-            cpfParams.push(req.user.company_id);
+            contribQuery += ' WHERE company_id = ?';
+            contribParams.push(req.user.company_id);
         }
-        const [cpfResult] = await db.execute(cpfQuery, cpfParams);
-        const totalCpfCollected = cpfResult[0].total_cpf || 0;
+        const [contribResult] = await db.execute(contribQuery, contribParams);
+        const totalContributionCollected = contribResult[0]?.total_contribution || 0;
 
         // 5. Generate Trend Data (Dynamic Range)
         const range = parseInt(req.query.range) || 7;
@@ -495,7 +495,8 @@ exports.getDashboardStats = async (req, res) => {
             lateTrend,
             absentStaff: absentStaff, // Full list for the UI
             trend: trendData,
-            totalCpfCollected: totalCpfCollected,
+            totalContributionCollected: totalContributionCollected,
+            totalCpfCollected: totalContributionCollected,
             salaryCycle: {
                 progress: Math.min(Math.round(((now.diff(cycleStartDateMoment, 'days') + 1) / (cycleEndDateMoment.diff(cycleStartDateMoment, 'days') + 1)) * 100), 100),
                 day: now.diff(cycleStartDateMoment, 'days') + 1,

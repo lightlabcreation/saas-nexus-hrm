@@ -15,7 +15,7 @@ exports.requestCompany = async (req, res) => {
     }
 };
 
-    exports.submitEnquiry = async (req, res) => {
+exports.submitEnquiry = async (req, res) => {
     try {
         const { name, email, phone, subject, message } = req.body;
         if (!name || !email || !subject || !message) {
@@ -26,7 +26,16 @@ exports.requestCompany = async (req, res) => {
             [name, email, phone || null, subject, message]
         );
 
-        // Notify SuperAdmin
+        // Always create In-App Notification for SuperAdmin
+        await notificationsUtil.createNotification({
+            company_id: null,
+            user_id: null,
+            title: 'New Support Enquiry',
+            message: `New enquiry from ${name} (${email}): "${subject}"`,
+            type: 'info'
+        });
+
+        // Also check if email notification setting is enabled
         await notificationsUtil.checkAndNotify('emailNewEnquiry', {
             company_id: null,
             user_id: null,

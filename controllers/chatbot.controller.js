@@ -223,7 +223,7 @@ function formatLocalResponse(toolName, result, context = {}) {
                     return `Your net salary accrued so far this month is **${curr(netSal)}** (after deductions).`;
                 }
 
-                return `**Salary Accrual (Current Month):**\n- **Gross Earnings:** ${curr(grossEar)}\n- **Advance Deductions:** ${curr(advDed)}\n- **CPF Employee Deduction:** ${curr(uifDed)}\n- **Net Salary So Far:** ${curr(netSal)}`;
+                return `**Salary Accrual (Current Month):**\n- **Gross Earnings:** ${curr(grossEar)}\n- **Advance Deductions:** ${curr(advDed)}\n- **Employee Contribution:** ${curr(uifDed)}\n- **Net Salary So Far:** ${curr(netSal)}`;
 
             case 'getEmployeeLeaves':
                 const userMsgLeave = (context.userMessage || '').toLowerCase();

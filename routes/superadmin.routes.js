@@ -16,8 +16,9 @@ router.delete('/company/:id', superadminController.deleteCompany);
 router.post('/company/:id/reset-password', superadminController.resetCompanyPassword);
 router.patch('/company/:id/status', superadminController.updateCompanyStatus);
 
-// Billing
+// Billing & Payments
 router.get('/billing/invoices', superadminController.getInvoices);
+router.get('/payments/history', superadminController.getPaymentHistory);
 router.get('/billing/payments', superadminController.getPayments);
 router.post('/billing/record-payment', superadminController.recordPayment);
 

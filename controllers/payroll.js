@@ -1,21 +1,39 @@
 const db = require('../config/db');
 
-// --- CPF Rate Helper ---
-const CPF_OW_CEILING = 8000;
+// Helper: Calculate generic employee and employer contributions
+function calculateContributions(baseSalary, emp, settings) {
+    if (!baseSalary || baseSalary <= 0) {
+        return { employeeContribution: 0, employerContribution: 0, totalContribution: 0 };
+    }
 
-function getCpfRates(dateOfBirth) {
-    if (!dateOfBirth) return null;
-    const today = new Date();
-    const dob = new Date(dateOfBirth);
-    let age = today.getFullYear() - dob.getFullYear();
-    const m = today.getMonth() - dob.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+    const isApplicable = emp.contribution_applicable === 1 || emp.contribution_applicable === true || emp.contribution_applicable === '1';
+    const isCompanyEnabled = settings.contribution_enabled === 1 || settings.contribution_enabled === true || settings.contribution_enabled === '1';
 
-    if (age <= 55) return { employee: 0.20, employer: 0.17, total: 0.37, age };
-    if (age <= 60) return { employee: 0.18, employer: 0.16, total: 0.34, age };
-    if (age <= 65) return { employee: 0.125, employer: 0.125, total: 0.25, age };
-    if (age <= 70) return { employee: 0.075, employer: 0.09, total: 0.165, age };
-    return { employee: 0.05, employer: 0.075, total: 0.125, age };
+    let employeeRate = 0;
+    let employerRate = 0;
+
+    if (isApplicable) {
+        if (emp.employee_contribution_percentage !== null && emp.employee_contribution_percentage !== undefined && emp.employee_contribution_percentage !== '') {
+            employeeRate = parseFloat(emp.employee_contribution_percentage) || 0;
+        } else if (isCompanyEnabled) {
+            employeeRate = parseFloat(settings.default_employee_contribution_percentage) || 0;
+        }
+
+        if (emp.employer_contribution_percentage !== null && emp.employer_contribution_percentage !== undefined && emp.employer_contribution_percentage !== '') {
+            employerRate = parseFloat(emp.employer_contribution_percentage) || 0;
+        } else if (isCompanyEnabled) {
+            employerRate = parseFloat(settings.default_employer_contribution_percentage) || 0;
+        }
+    } else if (isCompanyEnabled && emp.contribution_applicable === undefined) {
+        employeeRate = parseFloat(settings.default_employee_contribution_percentage) || 0;
+        employerRate = parseFloat(settings.default_employer_contribution_percentage) || 0;
+    }
+
+    const employeeContribution = Math.round((baseSalary * (employeeRate / 100)) * 100) / 100;
+    const employerContribution = Math.round((baseSalary * (employerRate / 100)) * 100) / 100;
+    const totalContribution = Math.round((employeeContribution + employerContribution) * 100) / 100;
+
+    return { employeeContribution, employerContribution, totalContribution };
 }
 
 // Helper: treat 'admin', 'Master Admin', 'hr', and 'hr admin' as admin roles
@@ -64,7 +82,7 @@ exports.generatePayroll = async (req, res) => {
 
         const results = [];
         for (const empId of employeeIds) {
-            const empSql = 'SELECT created_by, salary_rate, salary_type, is_uif_registered, advance_balance, date_of_birth FROM employees WHERE id = ?';
+            const empSql = 'SELECT created_by, salary_rate, salary_type, is_uif_registered, advance_balance, date_of_birth, contribution_applicable, employee_contribution_percentage, employer_contribution_percentage FROM employees WHERE id = ?';
             console.log('📝 Executing SQL:', empSql, 'Params:', [empId]);
             const [empCheck] = await db.execute(empSql, [empId]);
             
@@ -117,23 +135,18 @@ exports.generatePayroll = async (req, res) => {
             }
 
             const grossEarnings = Math.max(0, baseEarnings);
-            // CPF calculation (replaces flat 1% UIF)
-            const cpfRates = getCpfRates(employee.date_of_birth);
-            let cpfEmployee = 0, cpfEmployer = 0, cpfTotal = 0;
-            if (cpfRates && grossEarnings > 750) {
-                const cpfBase = Math.min(grossEarnings, CPF_OW_CEILING);
-                cpfEmployee = Math.round(cpfBase * cpfRates.employee * 100) / 100;
-                cpfEmployer = Math.round(cpfBase * cpfRates.employer * 100) / 100;
-                cpfTotal = Math.round(cpfBase * cpfRates.total * 100) / 100;
-            }
+            
+            // Generic Contribution calculation
+            const { employeeContribution, employerContribution, totalContribution } = calculateContributions(grossEarnings, employee, settings);
+
             const advance = parseFloat(employee.advance_balance || 0);
-            const netSalary = Math.max(0, grossEarnings - cpfEmployee - advance - deductions);
+            const netSalary = Math.max(0, grossEarnings - employeeContribution - advance - deductions);
             // Delete any existing pending payroll for this employee (prevents duplicates)
             await db.execute('DELETE FROM payroll WHERE employee_id = ? AND status = "pending"', [empId]);
 
             // Insert fresh payroll record
-            const insSql = 'INSERT INTO payroll (employee_id, cycle_start, cycle_end, total_hours, gross_earnings, base_salary, deductions, uif_amount, cpf_employee, cpf_employer, cpf_total, advance_deduction, overtime, net_salary, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "pending")';
-            const insParams = [empId, start, end, totalHours, grossEarnings, rate, deductions, cpfEmployee, cpfEmployee, cpfEmployer, cpfTotal, advance, (overtimeHours * rate * (parseFloat(settings.ot_multiplier) || 1.5)), netSalary];
+            const insSql = 'INSERT INTO payroll (employee_id, cycle_start, cycle_end, total_hours, gross_earnings, base_salary, deductions, uif_amount, cpf_employee, cpf_employer, cpf_total, employee_contribution, employer_contribution, total_contribution, advance_deduction, overtime, net_salary, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "pending")';
+            const insParams = [empId, start, end, totalHours, grossEarnings, rate, deductions, employeeContribution, employeeContribution, employerContribution, totalContribution, employeeContribution, employerContribution, totalContribution, advance, (overtimeHours * rate * (parseFloat(settings.ot_multiplier) || 1.5)), netSalary];
             await db.execute(insSql, insParams);
             results.push({ empId, action: 'created' });
         }

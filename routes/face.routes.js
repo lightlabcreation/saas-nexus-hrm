@@ -13,5 +13,6 @@ router.post('/check-out', auth, faceController.checkOut);
 
 // Check if face is registered
 router.get('/status/:employee_id', auth, faceController.getFaceStatus);
+router.delete('/delete/:employee_id', auth, faceController.deleteFace);
 
 module.exports = router;

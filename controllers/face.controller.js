@@ -99,7 +99,7 @@ exports.registerFace = async (req, res) => {
         
         for (const row of embeddings) {
             // Ignore if the same employee is updating their own face
-            if (row.employee_id === employee_id) continue;
+            if (String(row.employee_id) === String(employee_id)) continue;
             
             const storedDescriptor = typeof row.descriptor === 'string' ? JSON.parse(row.descriptor) : row.descriptor;
             const distance = euclideanDistance(descriptor, storedDescriptor);
@@ -138,11 +138,35 @@ exports.getTodayStatus = async (req, res) => {
         // Authenticated user
         const userId = req.user.id;
         
-        // Find employee id associated with this user
-        const [emp] = await db.execute('SELECT id FROM employees WHERE email = (SELECT email FROM users WHERE id = ?)', [userId]);
+        // Find employee id associated with this user, and their admin's name
+        const [emp] = await db.execute(`
+            SELECT e.id, e.name, e.company_id, e.created_by,
+                   u.name as admin_name, c.owner_name, c.company_name
+            FROM employees e
+            LEFT JOIN users u ON e.created_by = u.id
+            LEFT JOIN companies c ON e.company_id = c.id
+            WHERE e.email = (SELECT email FROM users WHERE id = ?)
+        `, [userId]);
+        
         if (emp.length === 0) return res.json({ status: 'not_found' });
 
-        const employeeId = emp[0].id;
+        const employee = emp[0];
+        const employeeId = employee.id;
+        const adminName = employee.admin_name || employee.owner_name || employee.company_name || 'Admin';
+
+        // Check if face is registered for this employee
+        const [face] = await db.execute('SELECT id FROM face_embeddings WHERE employee_id = ?', [employeeId]);
+        const isFaceRegistered = face.length > 0;
+
+        if (!isFaceRegistered) {
+            return res.json({ 
+                status: 'face_not_registered', 
+                employeeId,
+                adminName,
+                isFaceRegistered: false
+            });
+        }
+
         const today = moment().tz("Asia/Kolkata").format("YYYY-MM-DD");
 
         const [existing] = await db.execute(
@@ -151,11 +175,11 @@ exports.getTodayStatus = async (req, res) => {
         );
 
         if (existing.length === 0) {
-            return res.json({ status: 'not_checked_in', employeeId });
+            return res.json({ status: 'not_checked_in', employeeId, adminName, isFaceRegistered: true });
         } else if (!existing[0].out_time) {
-            return res.json({ status: 'checked_in', in_time: existing[0].in_time, employeeId });
+            return res.json({ status: 'checked_in', in_time: existing[0].in_time, employeeId, adminName, isFaceRegistered: true });
         } else {
-            return res.json({ status: 'checked_out', in_time: existing[0].in_time, out_time: existing[0].out_time, employeeId });
+            return res.json({ status: 'checked_out', in_time: existing[0].in_time, out_time: existing[0].out_time, employeeId, adminName, isFaceRegistered: true });
         }
     } catch (error) {
         console.error('Status check error:', error);
@@ -333,6 +357,17 @@ exports.getFaceStatus = async (req, res) => {
             res.json({ isRegistered: false });
         }
     } catch (error) {
+        res.status(500).json({ message: 'Internal Server Error' });
+    }
+};
+
+exports.deleteFace = async (req, res) => {
+    try {
+        const { employee_id } = req.params;
+        await db.execute('DELETE FROM face_embeddings WHERE employee_id = ?', [employee_id]);
+        res.json({ success: true, message: 'Biometric face profile unlocked and deleted successfully.' });
+    } catch (error) {
+        console.error('Delete face error:', error);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 };

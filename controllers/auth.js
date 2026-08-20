@@ -246,51 +246,84 @@ exports.forgotPasswordRequest = async (req, res) => {
 exports.register = async (req, res) => {
     const { companyName, adminName, email, phone, password, planId } = req.body;
 
-    if (!companyName || !adminName || !email || !password) {
-        return res.status(400).json({ message: 'Please fill in all required fields' });
+    if (!companyName || !adminName || !email || !password || !phone || !phone.trim()) {
+        return res.status(400).json({ message: 'All fields including Mobile Number are required.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+
+    if (cleanPhone.length < 10) {
+        return res.status(400).json({ message: 'Please enter a valid 10-digit mobile number.' });
     }
 
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
-        // 1. Check if email already exists in users table
-        const [existingUsers] = await connection.execute('SELECT id, company_id FROM users WHERE email = ?', [email]);
+        // 1. Check if email already exists in users or companies
+        const [existingUsers] = await connection.execute('SELECT id, company_id FROM users WHERE LOWER(email) = ?', [cleanEmail]);
         if (existingUsers.length > 0) {
             const [company] = await connection.execute('SELECT id FROM companies WHERE id = ?', [existingUsers[0].company_id]);
             if (company.length > 0) {
                 await connection.rollback();
-                return res.status(400).json({ message: 'Email already registered. Please login to your account.' });
+                return res.status(400).json({ message: 'You have already taken your Free Trial! Please purchase a paid plan to continue using Nexus HRM.' });
             } else {
                 // Orphaned user from deleted company -> clean it up
                 await connection.execute('DELETE FROM users WHERE id = ?', [existingUsers[0].id]);
             }
         }
 
-        // 2. Hash password
+        const [existingCompanyEmail] = await connection.execute('SELECT id, company_name FROM companies WHERE LOWER(email) = ?', [cleanEmail]);
+        if (existingCompanyEmail.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'You have already taken your Free Trial! Please purchase a paid plan to continue using Nexus HRM.' });
+        }
+
+        // 2. Check if mobile number already claimed a Free Trial / company
+        const last10Digits = cleanPhone.slice(-10);
+        const [existingCompanyPhone] = await connection.execute(
+            'SELECT id, company_name FROM companies WHERE REPLACE(REPLACE(REPLACE(phone, " ", ""), "-", ""), "+", "") LIKE ?',
+            [`%${last10Digits}`]
+        );
+        if (existingCompanyPhone.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'You have already taken your Free Trial with this mobile number! Please purchase a paid plan to continue using Nexus HRM.' });
+        }
+
+        const [existingReqPhone] = await connection.execute(
+            'SELECT id, company_name FROM company_requests WHERE REPLACE(REPLACE(REPLACE(phone, " ", ""), "-", ""), "+", "") LIKE ?',
+            [`%${last10Digits}`]
+        );
+        if (existingReqPhone.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'You have already taken your Free Trial with this mobile number! Please purchase a paid plan to continue using Nexus HRM.' });
+        }
+
+        // 3. Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
         const chosenPlan = planId || 'Free Trial';
 
-        // 3. Get plan employee limit
+        // 4. Get plan employee limit
         const [planRows] = await connection.execute('SELECT employee_limit, duration FROM plans WHERE name = ?', [chosenPlan]);
         const empLimit = planRows.length > 0 ? (planRows[0].employee_limit || 10) : 10;
         const planDuration = planRows.length > 0 ? (planRows[0].duration || 'weekly') : 'weekly';
 
-        // 4. Create Company directly (Instant Activation)
+        // 5. Create Company directly (Instant Activation)
         const [companyResult] = await connection.execute(
             'INSERT INTO companies (company_name, owner_name, email, phone, plan, employee_limit, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [companyName, adminName, email, phone || '', chosenPlan, empLimit, 'active']
+            [companyName.trim(), adminName.trim(), cleanEmail, phone.trim(), chosenPlan, empLimit, 'active']
         );
         const companyId = companyResult.insertId;
 
-        // 5. Create Admin User directly
+        // 6. Create Admin User directly
         const [userResult] = await connection.execute(
             'INSERT INTO users (name, email, password, role, company_id) VALUES (?, ?, ?, ?, ?)',
-            [adminName, email, hashedPassword, 'admin', companyId]
+            [adminName.trim(), cleanEmail, hashedPassword, 'admin', companyId]
         );
         const userId = userResult.insertId;
 
-        // 6. Create Initial Subscription (7 Days for Free Trial or Plan duration)
+        // 7. Create Initial Subscription (7 Days for Free Trial or Plan duration)
         let daysToAdd = 7;
         if (planDuration === 'monthly') daysToAdd = 30;
         if (planDuration === 'quarterly') daysToAdd = 90;
@@ -305,23 +338,23 @@ exports.register = async (req, res) => {
             [companyId, chosenPlan, 0, planDuration, endDate.toISOString().split('T')[0]]
         );
 
-        // 7. Log in company_requests as accepted for audit history
+        // 8. Log in company_requests as accepted for audit history
         await connection.execute(
             'INSERT INTO company_requests (company_name, owner_name, email, password, phone, plan, status) VALUES (?, ?, ?, ?, ?, ?, "accepted")',
-            [companyName, adminName, email, hashedPassword, phone || '', chosenPlan]
+            [companyName.trim(), adminName.trim(), cleanEmail, hashedPassword, phone.trim(), chosenPlan]
         );
 
-        // 8. Create Company Settings
+        // 9. Create Company Settings
         await connection.execute(
             'INSERT INTO settings (company_id, business_name, business_email, business_phone, currency) VALUES (?, ?, ?, ?, ?)',
-            [companyId, companyName, email, phone || '', 'INR']
+            [companyId, companyName.trim(), cleanEmail, phone.trim(), 'INR']
         );
 
         await connection.commit();
 
-        // 9. Generate JWT Token for Auto Login
+        // 10. Generate JWT Token for Auto Login
         const token = jwt.sign(
-            { id: userId, email, role: 'admin', company_id: companyId },
+            { id: userId, email: cleanEmail, role: 'admin', company_id: companyId },
             process.env.JWT_SECRET || 'your-secret-key',
             { expiresIn: '7d' }
         );
@@ -340,7 +373,7 @@ exports.register = async (req, res) => {
             user: {
                 id: userId,
                 name: adminName,
-                email: email,
+                email: cleanEmail,
                 role: 'admin',
                 company_id: companyId,
                 company_name: companyName
