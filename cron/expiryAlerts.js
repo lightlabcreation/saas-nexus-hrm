@@ -4,65 +4,88 @@ const notificationsUtil = require('../utils/notifications');
 
 const runExpiryChecks = async () => {
     try {
-        // Fetch all active companies
-        const [companies] = await db.execute("SELECT id, company_name, created_at, subscription_end FROM companies WHERE status = 'active'");
+        // Fetch latest active subscriptions with company details
+        const [subscriptions] = await db.execute(`
+            SELECT s.company_id, s.plan_name, s.end_date, s.billing_cycle, c.company_name 
+            FROM subscriptions s 
+            JOIN companies c ON s.company_id = c.id 
+            WHERE c.status = 'active' 
+            AND s.id = (SELECT MAX(id) FROM subscriptions WHERE company_id = c.id)
+        `);
         
-        for (let comp of companies) {
-            let endDateEnd = null;
-            if (comp.subscription_end) {
-                endDateEnd = new Date(comp.subscription_end);
-                endDateEnd.setHours(23, 59, 59, 999);
+        for (let sub of subscriptions) {
+            if (!sub.end_date) continue;
+
+            const endDate = new Date(sub.end_date);
+            const today = new Date();
+            const endMidnight = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+            const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+            const diffTime = endMidnight - todayMidnight;
+            const daysLeft = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+            const planName = (sub.plan_name || '').toLowerCase();
+            const isTrial = planName.includes('free') || planName.includes('trial') || (sub.billing_cycle || '').toLowerCase() === 'weekly';
+
+            // Free Trial: ONLY alert when 1 day is left
+            if (isTrial) {
+                if (daysLeft === 1) {
+                    // Notify Company Admin
+                    await notificationsUtil.createNotification({
+                        company_id: sub.company_id,
+                        title: 'Free Trial Expiring Tomorrow',
+                        message: `Your Free Trial for ${sub.company_name} expires tomorrow! Please purchase a paid plan to continue uninterrupted access.`,
+                        type: 'warning'
+                    });
+                    // Notify SuperAdmin
+                    await notificationsUtil.createNotification({
+                        company_id: null,
+                        title: 'Free Trial Expiring Tomorrow',
+                        message: `${sub.company_name}'s Free Trial will expire tomorrow.`,
+                        type: 'info'
+                    });
+                }
+                continue;
             }
 
-            if (!endDateEnd) continue;
-
-            const timeDiff = endDateEnd - new Date();
-            const daysLeft = Math.ceil(timeDiff / (1000 * 60 * 60 * 24));
-
-            // Determine if an alert needs to be sent
+            // Paid Plans: Standard alerts for 7, 3, and 1 day left
             if (daysLeft === 7) {
-                // Notify Company
                 await notificationsUtil.checkAndNotify('systemCompanyExpiry', {
-                    company_id: comp.id,
+                    company_id: sub.company_id,
                     title: 'Subscription Expiring Soon',
-                    message: `Your subscription for ${comp.company_name} will expire in 7 days. Please renew to avoid interruption.`,
+                    message: `Your subscription for ${sub.company_name} will expire in 7 days. Please renew to avoid interruption.`,
                     type: 'warning'
                 });
-                // Notify SuperAdmin
                 await notificationsUtil.checkAndNotify('systemCompanyExpiry', {
                     company_id: null,
                     title: 'Company Subscription Expiring Soon',
-                    message: `${comp.company_name}'s subscription will expire in 7 days.`,
+                    message: `${sub.company_name}'s subscription will expire in 7 days.`,
                     type: 'warning'
                 });
             } else if (daysLeft === 3) {
-                // Notify Company
                 await notificationsUtil.checkAndNotify('systemExpiry3Day', {
-                    company_id: comp.id,
+                    company_id: sub.company_id,
                     title: 'Subscription Expiring in 3 Days',
-                    message: `Your subscription for ${comp.company_name} will expire in 3 days. Please renew immediately.`,
+                    message: `Your subscription for ${sub.company_name} will expire in 3 days. Please renew immediately.`,
                     type: 'warning'
                 });
-                // Notify SuperAdmin
                 await notificationsUtil.checkAndNotify('systemExpiry3Day', {
                     company_id: null,
                     title: 'Company Subscription Expiring in 3 Days',
-                    message: `${comp.company_name}'s subscription will expire in 3 days.`,
+                    message: `${sub.company_name}'s subscription will expire in 3 days.`,
                     type: 'warning'
                 });
             } else if (daysLeft === 1) {
-                // Notify Company
                 await notificationsUtil.checkAndNotify('systemExpiry1Day', {
-                    company_id: comp.id,
+                    company_id: sub.company_id,
                     title: 'Subscription Expires Tomorrow',
-                    message: `URGENT: Your subscription for ${comp.company_name} expires tomorrow! All access will be restricted.`,
+                    message: `URGENT: Your subscription for ${sub.company_name} expires tomorrow! All access will be restricted.`,
                     type: 'error'
                 });
-                // Notify SuperAdmin
                 await notificationsUtil.checkAndNotify('systemExpiry1Day', {
                     company_id: null,
                     title: 'Company Subscription Expires Tomorrow',
-                    message: `URGENT: ${comp.company_name}'s subscription expires tomorrow!`,
+                    message: `URGENT: ${sub.company_name}'s subscription expires tomorrow!`,
                     type: 'error'
                 });
             }

@@ -69,28 +69,112 @@ exports.getCompanies = async (req, res) => {
     }
 };
 
+const getPlanDurationDays = (durationStr = '', planName = '') => {
+    const d = (durationStr || '').toLowerCase().trim();
+    const p = (planName || '').toLowerCase().trim();
+
+    if (p.includes('trial') || p.includes('free') || d.includes('week') || d.includes('7')) {
+        return 7;
+    }
+    if (d.includes('quarter') || d.includes('3 month')) {
+        return 90;
+    }
+    if (d.includes('half') || d.includes('6 month')) {
+        return 180;
+    }
+    if (d.includes('year') || d.includes('annual') || d.includes('12 month')) {
+        return 365;
+    }
+    if (d.includes('month')) {
+        const match = d.match(/(\d+)\s*month/);
+        if (match) {
+            return parseInt(match[1], 10) * 30;
+        }
+        return 30;
+    }
+    if (d.includes('day')) {
+        const match = d.match(/(\d+)\s*day/);
+        if (match) {
+            return parseInt(match[1], 10);
+        }
+    }
+    return 30;
+};
+
 exports.createCompany = async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
         const { company_name, owner_name, email, phone, plan, employee_limit, status, password } = req.body;
         
-        // 1. Insert Company
+        if (!company_name || !owner_name || !email) {
+            await connection.rollback();
+            return res.status(400).json({ error: 'Company Name, Owner Name, and Email are required' });
+        }
+
+        // 1. Check if email is already in use
+        const [existingUsers] = await connection.execute('SELECT id, company_id FROM users WHERE email = ?', [email]);
+        if (existingUsers.length > 0) {
+            const [company] = await connection.execute('SELECT id, company_name FROM companies WHERE id = ?', [existingUsers[0].company_id]);
+            if (company.length > 0) {
+                await connection.rollback();
+                return res.status(400).json({ error: `Email '${email}' is already in use by company '${company[0].company_name}'. Please use a different email.` });
+            } else {
+                // Orphaned user record from a deleted company -> delete it
+                await connection.execute('DELETE FROM users WHERE id = ?', [existingUsers[0].id]);
+            }
+        }
+
+        const [existingCompanies] = await connection.execute('SELECT id, company_name FROM companies WHERE email = ?', [email]);
+        if (existingCompanies.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ error: `A company with email '${email}' already exists ('${existingCompanies[0].company_name}').` });
+        }
+
+        // 2. Fetch Plan details
+        const planToAssign = plan || 'Free Plan';
+        const [planRows] = await connection.execute('SELECT * FROM plans WHERE name = ?', [planToAssign]);
+        const planData = planRows[0] || {};
+        const empLimit = (employee_limit !== undefined && employee_limit !== '' && employee_limit !== null) 
+            ? Number(employee_limit) 
+            : (planData.employee_limit || 25);
+        const durationStr = planData.duration || 'weekly';
+        const durationDays = getPlanDurationDays(durationStr, planToAssign);
+        const billingCycle = durationDays === 7 ? 'weekly' : durationDays === 365 ? 'yearly' : 'monthly';
+        const planAmount = parseFloat(planData.price) || 0.00;
+
+        // 3. Insert Company
         const [companyResult] = await connection.execute(
             'INSERT INTO companies (company_name, owner_name, email, phone, plan, employee_limit, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [company_name, owner_name, email, phone, plan, employee_limit, status || 'active', req.user.id]
+            [company_name, owner_name, email, phone || '', planToAssign, empLimit, status || 'active', req.user.id]
         );
         const companyId = companyResult.insertId;
 
-        // 2. Create Admin User for this company if password is provided
-        if (password) {
-            const bcrypt = require('bcryptjs');
-            const hashedPassword = await bcrypt.hash(password, 10);
-            await connection.execute(
-                'INSERT INTO users (name, email, password, role, company_id) VALUES (?, ?, ?, ?, ?)',
-                [owner_name, email, hashedPassword, 'admin', companyId]
-            );
-        }
+        // 4. Create Admin User for this company
+        const bcrypt = require('bcryptjs');
+        const userPassword = password || '12345678';
+        const hashedPassword = await bcrypt.hash(userPassword, 10);
+        await connection.execute(
+            'INSERT INTO users (name, email, password, role, company_id) VALUES (?, ?, ?, ?, ?)',
+            [owner_name, email, hashedPassword, 'admin', companyId]
+        );
+
+        // 5. Create Initial Subscription with accurate plan duration
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + durationDays);
+        const formattedEndDate = endDate.toISOString().split('T')[0];
+
+        await connection.execute(
+            `INSERT INTO subscriptions (company_id, plan_name, amount, billing_cycle, payment_status, start_date, end_date)
+             VALUES (?, ?, ?, ?, 'paid', CURDATE(), ?)`,
+            [companyId, planToAssign, planAmount, billingCycle, formattedEndDate]
+        );
+
+        // 6. Create default company settings
+        await connection.execute(
+            'INSERT INTO settings (company_id, business_name, business_email, business_phone) VALUES (?, ?, ?, ?)',
+            [companyId, company_name, email, phone || '']
+        );
 
         await connection.commit();
 
@@ -98,10 +182,11 @@ exports.createCompany = async (req, res) => {
         await audit.logAction(req.user.id, 'CREATE COMPANY', companyId, JSON.stringify({
             info: `Created company: ${company_name}`,
             email: email,
-            plan: plan
+            plan: planToAssign,
+            durationDays: durationDays
         }));
 
-        res.json({ message: 'Company created', id: companyId });
+        res.json({ message: 'Company created successfully', id: companyId });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -116,6 +201,24 @@ exports.updateCompany = async (req, res) => {
         await connection.beginTransaction();
         const { id } = req.params;
         const { company_name, owner_name, email, phone, plan, employee_limit, status, password } = req.body;
+
+        // Check if email belongs to a different company/user
+        if (email) {
+            const [otherUsers] = await connection.execute(
+                'SELECT id, company_id FROM users WHERE email = ? AND (company_id != ? OR company_id IS NULL)',
+                [email, id]
+            );
+            if (otherUsers.length > 0) {
+                const [otherCompany] = await connection.execute('SELECT id, company_name FROM companies WHERE id = ?', [otherUsers[0].company_id]);
+                if (otherCompany.length > 0) {
+                    await connection.rollback();
+                    return res.status(400).json({ error: `Email '${email}' is already in use by company '${otherCompany[0].company_name}'.` });
+                } else {
+                    // Clean up orphaned record
+                    await connection.execute('DELETE FROM users WHERE id = ?', [otherUsers[0].id]);
+                }
+            }
+        }
         
         // 1. Update Company
         await connection.execute(
@@ -123,7 +226,7 @@ exports.updateCompany = async (req, res) => {
             [company_name, owner_name, email, phone, plan, employee_limit, status, id]
         );
 
-        // 2. Check if Admin User exists for this company
+        // 3. Update or Create Admin User
         const [existingAdmins] = await connection.execute(
             'SELECT * FROM users WHERE company_id = ? AND role = "admin"',
             [id]
@@ -131,24 +234,65 @@ exports.updateCompany = async (req, res) => {
 
         const bcrypt = require('bcryptjs');
         if (existingAdmins.length > 0) {
-            // Update existing Admin (Password update explicitly removed for privacy)
-            await connection.execute(
-                'UPDATE users SET name = ?, email = ? WHERE company_id = ? AND role = "admin"',
-                [owner_name, email, id]
-            );
-        } else {
-            // Create Admin if not exists
-            if (password) {
+            if (password && password.trim() !== '') {
                 const hashedPassword = await bcrypt.hash(password, 10);
                 await connection.execute(
-                    'INSERT INTO users (name, email, password, role, company_id) VALUES (?, ?, ?, ?, ?)',
-                    [owner_name, email, hashedPassword, 'admin', id]
+                    'UPDATE users SET name = ?, email = ?, password = ? WHERE company_id = ? AND role = "admin"',
+                    [owner_name, email, hashedPassword, id]
+                );
+            } else {
+                await connection.execute(
+                    'UPDATE users SET name = ?, email = ? WHERE company_id = ? AND role = "admin"',
+                    [owner_name, email, id]
+                );
+            }
+        } else {
+            // Create Admin if missing
+            const userPassword = password || '12345678';
+            const hashedPassword = await bcrypt.hash(userPassword, 10);
+            await connection.execute(
+                'INSERT INTO users (name, email, password, role, company_id) VALUES (?, ?, ?, ?, ?)',
+                [owner_name, email, hashedPassword, 'admin', id]
+            );
+        }
+
+        // 4. Update Subscription if plan specified
+        if (plan) {
+            const [planRows] = await connection.execute('SELECT * FROM plans WHERE name = ?', [plan]);
+            const planData = planRows[0] || {};
+            const durationDays = getPlanDurationDays(planData.duration, plan);
+            const billingCycle = durationDays === 7 ? 'weekly' : durationDays === 365 ? 'yearly' : 'monthly';
+            const planAmount = parseFloat(planData.price) || 0.00;
+
+            const [currSubs] = await connection.execute(
+                'SELECT id, plan_name FROM subscriptions WHERE company_id = ? ORDER BY id DESC LIMIT 1',
+                [id]
+            );
+
+            if (currSubs.length > 0) {
+                if (currSubs[0].plan_name !== plan) {
+                    const endDate = new Date();
+                    endDate.setDate(endDate.getDate() + durationDays);
+                    const formattedEndDate = endDate.toISOString().split('T')[0];
+                    await connection.execute(
+                        'UPDATE subscriptions SET plan_name = ?, amount = ?, billing_cycle = ?, start_date = CURDATE(), end_date = ? WHERE id = ?',
+                        [plan, planAmount, billingCycle, formattedEndDate, currSubs[0].id]
+                    );
+                }
+            } else {
+                const endDate = new Date();
+                endDate.setDate(endDate.getDate() + durationDays);
+                const formattedEndDate = endDate.toISOString().split('T')[0];
+                await connection.execute(
+                    `INSERT INTO subscriptions (company_id, plan_name, amount, billing_cycle, payment_status, start_date, end_date)
+                     VALUES (?, ?, ?, ?, 'paid', CURDATE(), ?)`,
+                    [id, plan, planAmount, billingCycle, formattedEndDate]
                 );
             }
         }
 
         await connection.commit();
-        res.json({ message: 'Company updated' });
+        res.json({ message: 'Company updated successfully' });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
@@ -158,11 +302,34 @@ exports.updateCompany = async (req, res) => {
 };
 
 exports.deleteCompany = async (req, res) => {
+    const connection = await db.getConnection();
     try {
-        await db.execute('DELETE FROM companies WHERE id=?', [req.params.id]);
-        res.json({ message: 'Company deleted' });
+        await connection.beginTransaction();
+        const { id } = req.params;
+
+        // Cascade delete all associated company records
+        await connection.execute('DELETE FROM users WHERE company_id = ? AND role != "superadmin"', [id]);
+        await connection.execute('DELETE FROM employees WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM attendance WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM payroll WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM leaves WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM leave_balances WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM claims WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM kpis WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM geofences WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM kiosk_settings WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM subscriptions WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM settings WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM support_tickets WHERE company_id = ?', [id]);
+        await connection.execute('DELETE FROM companies WHERE id = ?', [id]);
+
+        await connection.commit();
+        res.json({ message: 'Company and all associated data deleted successfully' });
     } catch (err) {
+        await connection.rollback();
         res.status(500).json({ error: err.message });
+    } finally {
+        connection.release();
     }
 };
 
@@ -227,13 +394,29 @@ exports.acceptRequest = async (req, res) => {
             return res.status(400).json({ error: 'Request already accepted' });
         }
 
+        // Clean up any orphaned user with this email
+        const [existingUsers] = await connection.execute('SELECT id, company_id FROM users WHERE email = ?', [reqData.email]);
+        if (existingUsers.length > 0) {
+            const [company] = await connection.execute('SELECT id, company_name FROM companies WHERE id = ?', [existingUsers[0].company_id]);
+            if (company.length > 0) {
+                await connection.rollback();
+                return res.status(400).json({ error: `Email '${reqData.email}' is already in use by company '${company[0].company_name}'.` });
+            } else {
+                await connection.execute('DELETE FROM users WHERE id = ?', [existingUsers[0].id]);
+            }
+        }
+
         // 1. Mark request as accepted
         await connection.execute('UPDATE company_requests SET status="accepted" WHERE id=?', [id]);
 
-        // 2. Insert into companies
-        const planToAssign = reqData.plan || 'Free Trial';
-        const [planRows] = await connection.execute('SELECT employee_limit FROM plans WHERE name = ?', [planToAssign]);
-        const empLimit = planRows.length > 0 ? (planRows[0].employee_limit || 0) : 0;
+        // 2. Fetch Plan details & Insert into companies
+        const planToAssign = reqData.plan || 'Free Plan';
+        const [planRows] = await connection.execute('SELECT * FROM plans WHERE name = ?', [planToAssign]);
+        const planData = planRows[0] || {};
+        const empLimit = planData.employee_limit || 25;
+        const durationDays = getPlanDurationDays(planData.duration, planToAssign);
+        const billingCycle = durationDays === 7 ? 'weekly' : durationDays === 365 ? 'yearly' : 'monthly';
+        const planAmount = parseFloat(planData.price) || 0.00;
 
         const [companyResult] = await connection.execute(
             'INSERT INTO companies (company_name, owner_name, email, phone, plan, employee_limit, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -249,10 +432,18 @@ exports.acceptRequest = async (req, res) => {
 
         // 4. Create Subscriptions
         const endDate = new Date();
-        endDate.setDate(endDate.getDate() + 7); // Default 7 days trial logic, superadmin can adjust later
+        endDate.setDate(endDate.getDate() + durationDays);
+        const formattedEndDate = endDate.toISOString().split('T')[0];
+
         await connection.execute(
             'INSERT INTO subscriptions (company_id, plan_name, amount, billing_cycle, start_date, end_date, payment_status) VALUES (?, ?, ?, ?, CURDATE(), ?, "paid")',
-            [companyId, planToAssign, 0, 'monthly', endDate.toISOString().split('T')[0]]
+            [companyId, planToAssign, planAmount, billingCycle, formattedEndDate]
+        );
+
+        // 5. Create default company settings
+        await connection.execute(
+            'INSERT INTO settings (company_id, business_name, business_email, business_phone) VALUES (?, ?, ?, ?)',
+            [companyId, reqData.company_name, reqData.email, reqData.phone || '']
         );
 
         await connection.commit();

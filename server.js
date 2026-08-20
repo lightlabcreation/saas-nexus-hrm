@@ -614,6 +614,36 @@ const initDB = async () => {
             )
         `);
 
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ticket_number VARCHAR(20) UNIQUE,
+                company_id BIGINT,
+                created_by INT,
+                title VARCHAR(255) NOT NULL,
+                message TEXT,
+                attachment_url VARCHAR(500) DEFAULT NULL,
+                status ENUM('pending','seen','solved') DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+            )
+        `);
+
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS support_ticket_messages (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ticket_id INT NOT NULL,
+                sender_id INT NOT NULL,
+                sender_role ENUM('superadmin', 'admin') NOT NULL,
+                sender_name VARCHAR(150) NOT NULL,
+                message TEXT NOT NULL,
+                attachment_url VARCHAR(500) DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+            )
+        `);
+
         console.log('✅ New module tables checked/created');
 
 

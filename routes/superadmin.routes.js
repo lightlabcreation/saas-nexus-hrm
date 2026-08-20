@@ -48,4 +48,27 @@ router.get('/enquiries', superadminController.getEnquiries);
 router.put('/enquiry/:id/resolve', superadminController.resolveEnquiry);
 router.delete('/enquiry/:id', superadminController.deleteEnquiry);
 
+const multer = require('multer');
+const path = require('path');
+
+// Multer Storage
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/');
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({ storage });
+
+// Support Tickets (SuperAdmin)
+const supportController = require('../controllers/support.controller');
+router.get('/support-tickets', supportController.getAllTickets);
+router.get('/support-ticket/:id', supportController.getTicketDetail);
+router.put('/support-ticket/:id/status', supportController.updateTicketStatus);
+router.get('/support-ticket/:id/messages', supportController.getTicketMessages);
+router.post('/support-ticket/:id/messages', upload.single('attachment'), supportController.sendSuperAdminMessage);
+
 module.exports = router;

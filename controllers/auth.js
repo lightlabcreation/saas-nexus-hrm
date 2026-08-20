@@ -255,10 +255,16 @@ exports.register = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Check if email already exists in users table
-        const [existingUsers] = await connection.execute('SELECT * FROM users WHERE email = ?', [email]);
+        const [existingUsers] = await connection.execute('SELECT id, company_id FROM users WHERE email = ?', [email]);
         if (existingUsers.length > 0) {
-            await connection.rollback();
-            return res.status(400).json({ message: 'Email already registered. Please login to your account.' });
+            const [company] = await connection.execute('SELECT id FROM companies WHERE id = ?', [existingUsers[0].company_id]);
+            if (company.length > 0) {
+                await connection.rollback();
+                return res.status(400).json({ message: 'Email already registered. Please login to your account.' });
+            } else {
+                // Orphaned user from deleted company -> clean it up
+                await connection.execute('DELETE FROM users WHERE id = ?', [existingUsers[0].id]);
+            }
         }
 
         // 2. Hash password

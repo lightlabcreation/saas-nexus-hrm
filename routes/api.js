@@ -182,4 +182,11 @@ router.post('/kiosk/punch', (req, res, next) => {
 }, kioskController.kioskPunch);
 router.post('/kiosk/face-punch', auth, kioskController.kioskFacePunch);
 
+// Support Tickets (Company Admin)
+const supportController = require('../controllers/support.controller');
+router.post('/support/tickets', auth, upload.single('attachment'), supportController.createTicket);
+router.get('/support/tickets', auth, supportController.getMyTickets);
+router.get('/support/tickets/:id/messages', auth, supportController.getTicketMessages);
+router.post('/support/tickets/:id/messages', auth, upload.single('attachment'), supportController.sendAdminMessage);
+
 module.exports = router;
