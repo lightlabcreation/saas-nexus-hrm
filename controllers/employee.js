@@ -123,12 +123,18 @@ exports.addEmployee = async (req, res) => {
         const [[lastMachine]] = await db.execute(machineSql, idParams);
         const nextMachineId = lastMachine && lastMachine.machine_id ? (parseInt(lastMachine.machine_id) + 1) : 1001;
 
-        const finalCustomId = custom_id || nextCustomId.toString();
+        const finalCustomId = (custom_id && custom_id.trim() !== '') ? custom_id.trim() : nextCustomId.toString();
+        const finalMachineId = (machine_id && machine_id.toString().trim() !== '') ? machine_id.toString().trim() : nextMachineId.toString();
 
-        // 1.5 Check for duplicate Employee ID
-        const [dupCheck] = await db.execute('SELECT id FROM employees WHERE custom_id = ? AND company_id = ?', [finalCustomId, req.user.company_id]);
+        // 1.5 Check for duplicate Employee ID or Machine ID within the same company
+        const [dupCheck] = await db.execute(
+            'SELECT id, custom_id, machine_id FROM employees WHERE (custom_id = ? OR machine_id = ?) AND company_id = ?', 
+            [finalCustomId, finalMachineId, req.user.company_id]
+        );
         if (dupCheck.length > 0) {
-            return res.status(400).json({ message: `Employee ID ${finalCustomId} is already in use. Please use a unique ID.` });
+            const matched = dupCheck[0];
+            const duplicateField = matched.custom_id === finalCustomId ? `Employee ID ${finalCustomId}` : `Machine ID ${finalMachineId}`;
+            return res.status(400).json({ message: `${duplicateField} is already in use in your organization. Please use a unique ID.` });
         }
 
         // 2. Insert into employees table
@@ -146,7 +152,7 @@ exports.addEmployee = async (req, res) => {
         const empSql = 'INSERT INTO employees (machine_id, custom_id, name, role, department, shift, email, phone, salary_rate, salary_type, joined_date, date_of_birth, photo, uif_number, advance_balance, signature, created_by, is_uif_registered, company_id, assigned_branch, contribution_applicable, employee_contribution_percentage, employer_contribution_percentage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         const formattedDOB = date_of_birth ? date_of_birth.split('T')[0] : null;
         const empValues = [
-            nextMachineId.toString(),
+            finalMachineId,
             finalCustomId,
             name || '',
             dbRole,

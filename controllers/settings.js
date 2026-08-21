@@ -299,8 +299,11 @@ exports.getSiteInfo = async (req, res) => {
 
 exports.getCurrentPlan = async (req, res) => {
     try {
-        const [compRows] = await db.execute('SELECT id, company_name, email, phone, status, plan, created_at FROM companies WHERE id = ?', [req.user.company_id]);
+        const [compRows] = await db.execute('SELECT id, company_name, email, phone, status, plan, employee_limit, created_at FROM companies WHERE id = ?', [req.user.company_id]);
         const comp = compRows[0] || {};
+
+        const [countRows] = await db.execute('SELECT COUNT(*) as employee_count FROM employees WHERE company_id = ?', [req.user.company_id]);
+        const employeeCount = countRows[0]?.employee_count || 0;
 
         const sql = `
             SELECT s.plan_name, s.end_date, s.payment_status, s.amount, s.billing_cycle, s.created_at
@@ -309,28 +312,22 @@ exports.getCurrentPlan = async (req, res) => {
             ORDER BY s.id DESC LIMIT 1
         `;
         const [rows] = await db.execute(sql, [req.user.company_id]);
-        if (rows.length === 0) {
-            return res.json({ 
-                plan_name: comp.plan || 'Free Trial', 
-                end_date: null, 
-                payment_status: 'paid', 
-                amount: 0, 
-                billing_cycle: 'weekly',
-                created_at: comp.created_at,
-                company_id: comp.id,
-                company_name: comp.company_name,
-                company_email: comp.email,
-                company_phone: comp.phone,
-                company_status: comp.status || 'active'
-            });
-        }
+        const activeSub = rows.length > 0 ? rows[0] : {};
+
         res.json({
-            ...rows[0],
+            plan_name: activeSub.plan_name || comp.plan || 'Free Trial', 
+            end_date: activeSub.end_date || null, 
+            payment_status: activeSub.payment_status || 'paid', 
+            amount: activeSub.amount || 0, 
+            billing_cycle: activeSub.billing_cycle || 'weekly',
+            created_at: activeSub.created_at || comp.created_at,
             company_id: comp.id,
             company_name: comp.company_name,
             company_email: comp.email,
             company_phone: comp.phone,
-            company_status: comp.status || 'active'
+            company_status: comp.status || 'active',
+            employee_limit: comp.employee_limit !== undefined && comp.employee_limit !== null ? comp.employee_limit : 0,
+            employee_count: employeeCount
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

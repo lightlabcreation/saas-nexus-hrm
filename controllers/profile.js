@@ -21,8 +21,10 @@ exports.updateProfile = async (req, res) => {
         const userId = req.user.id;
         const employeeId = req.user.employee_id;
         const { name, email, password, photo } = req.body;
-        // NOTE: 'role' is intentionally NOT accepted here to prevent privilege escalation.
-        // Role changes must go through admin/superadmin management endpoints.
+        // NOTE: 'role' and 'email' are intentionally protected to prevent privilege escalation or unauthorized company takeover.
+        // Role and Email changes must go through Super Admin management endpoints.
+        const userRole = (req.user.role || '').toLowerCase();
+        const isSuperAdmin = userRole.includes('superadmin') || userRole.includes('master');
 
         const updates = [];
         const params = [];
@@ -31,7 +33,7 @@ exports.updateProfile = async (req, res) => {
             updates.push('name = ?');
             params.push(name);
         }
-        if (email !== undefined) {
+        if (email !== undefined && isSuperAdmin) {
             updates.push('email = ?');
             params.push(email);
         }
